@@ -1,33 +1,52 @@
-import gym
-from gym import spaces
+# A Gym Environment for simulating an Elevator Control System
+
+# Author: Zining Mao
+# Date : July 2023
+
+import gymnasium as gym
+from gymnasium import spaces
 import pygame
 import numpy as np
-
+import PassengerGenerator
+import queue
 
 class ElevatorGroupEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, render_mode=None,  ):
+    def __init__(self, num_floor, num_elevator, num_passenger, num_timestep, capacity, render_mode=None):
+
+        self.num_floor = num_floor
+        self.num_elevator = num_elevator
+
+        self.num_passenger = num_passenger
+        self.num_timestep = num_timestep
+
+        self.capacity = capacity # capacity of the elevator
+
+        self.passenger_generator = PassengerGenerator(self.num_floor, self.num_passenger, self.num_timestep)
+        self._curr_timestep = 0 # keeping track of the current timestep
 
         self.window_size = 512  # The size of the PyGame window
 
         # Observation space for the elevator group control system
         self.observation_space = spaces.Dict(
             {
-                "pos": spaces.MultiDiscrete([18, 18, 18, 18], dtype=int), # position of 4 elevators, 18 floors each.
-                "people": spaces.Box(0, 10, shape=[18, ], dtype=int), # people waiting on each floor
-                "capacity": spaces.MultiDiscrete([10, 10, 10, 10]), # capacity of the elevator 
-                "call": spaces.MultiDiscrete([18, 18, 18, 18]), # Hallway elevator calls
-                "targets": spaces.MultiBinary([18, 18, 18, 18]) # Target floors for the elevators
-            })
+                "pos": spaces.Box(1, self.num_floor, shape=[self.num_elevator, ], dtype=np.int32), # position of 4 elevators, 18 floors each.
+                "passenger": spaces.Box(0, self.num_passenger, shape=[self.num_floor, ], dtype=np.int32), # people waiting on each floor
+                "capacity": spaces.Box(0, self.capacity, shape=[self.num_elevator,]), # capacity of each elevator 
+                "up_call": spaces.MultiBinary([self.num_elevator, self.num_floor]), # Hallway elevator calls for going up
+                "down_call": spaces.MultiBinary([self.num_elevator, self.num_floor]), # Hallway elevator calls for going down
+                "car_call": spaces.MultiBinary([self.num_elevator, self.num_floor]) # Target floors for the elevators
+            }
+            )
 
-        # We have 4 actions for each elevator, corresponding to "up", "down", "stop"
+        # We have 3 actions for each elevator, corresponding to "up", "down", "stop". The action corresponds to index 0, 1, 2.
         # If someone needs to get off at the current floor, the stop action will let the people out. 
         # If someone needs to get on at the the current floor, the stop action will let the people in.
         # Otherwise the elevator will be waiting.
         # The above tasks can be done simultaneously in one timestep.
 
-        self.action_space = spaces.MultiDiscrete([3, 3, 3 ,3])
+        self.action_space = spaces.MultiDiscrete(np.ones([self.num_elevator], dtype=np.int32) * 3,)
 
         """
         The following dictionary maps abstract actions from `self.action_space` to 
@@ -54,36 +73,53 @@ class ElevatorGroupEnv(gym.Env):
         self.clock = None
 
     def _get_obs(self):
-        return {"pos": self._pos,
-                "people": self._people,
-                "capacity": self._capacity,
-                "call": self._call,
-                "target": self._target_location
-                }
+        return {
+                "pos": self._elevator_pos, # position of 4 elevators, 18 floors each.
+                "passenger": self._curr_passenger, # people waiting on each floor
+                "capacity": self._curr_capacity, # capacity of each elevator 
+                "up_call": self._curr_up_call, # Hallway elevator calls for going up
+                "down_call": self._curr_down_call, # Hallway elevator calls for going down
+                "car_call": self._curr_car_call # Target floors for the elevators
+        }
 
     def _get_info(self):
         return {
-            "distance": np.linalg.norm(
-                self._agent_location - self._target_location, ord=1
-            )
-        }
+            "num_passenger_delivered": self._num_passenger_delivered,
+            "cumulative_waiting_time": self._cumulative_waiting_time,
+            }
 
     def reset(self, seed=None, options=None):
         # We need the following line to seed self.np_random
         super().reset(seed=seed)
 
-        # Choose the elevators' locations uniformly at random
-        self._pos = self.np_random.integers(0, 18, size=4, dtype=int)
+        # Choose the elevators' start locations uniformly at random
+        self._elevator_pos = self.np_random.integers(0, self.num_floor, size=self.num_elevator, dtype=np.int32)
 
-        # Generate a random sequence of tasks. The tasks are presented as (start, goal, timestep)
-        #
+        # Generate a random sequence of tasks. The tasks is a dictionary indexed 
+        self._tasks = self.passenger_generator.genereate_passengers()
 
-        # We will sample the target's location randomly until it does not coincide with the agent's location
-        self._target_location = self._agent_location
-        while np.array_equal(self._target_location, self._agent_location):
-            self._target_location = self.np_random.integers(
-                0, self.size, size=2, dtype=int
-            )
+        # initialize observation variables
+        self._curr_timestep = 0
+        self._curr_passenger = np.zeros([self.num_floor])
+        self._curr_capacity = np.ones([self.num_elevator]) * self.capacity
+        self._curr_up_call = np.zeros([self.num_floor]) 
+        self._curr_down_call = np.zeros([self.num_floor])
+        self._curr_car_call = np.zeros([self.num_elevator, self.num_floor])
+
+        self._num_passenger_delivered = 0
+        self._cumulative_waiting_time = 0 # time between start task to task complete (the passenger reaches the goal floor)
+        self._pending_task = 0
+
+        # update the observation based on the task sequence
+
+        for task in self._tasks[0]: # the first time step
+            # update hall calls
+            if task[2] == 1:
+                self._curr_up_call[task[0]] = True
+            else:
+                self._curr_down_call[task[0]] = True
+            self._pending_task += 1
+
 
         observation = self._get_obs()
         info = self._get_info()
@@ -94,6 +130,7 @@ class ElevatorGroupEnv(gym.Env):
         return observation, info
 
     def step(self, action):
+        # The car call observation is updated when the passenger enters the elevator
         # Map the action (element of {0,1,2,3}) to the direction we walk in
         direction = self._action_to_direction[action]
         # We use `np.clip` to make sure we don't leave the grid
