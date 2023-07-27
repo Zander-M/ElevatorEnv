@@ -7,32 +7,37 @@ import numpy as np
 class ElevatorGroupEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, render_mode=None, size=5):
-        self.size = size  # The size of the square grid
+    def __init__(self, render_mode=None,  ):
+
         self.window_size = 512  # The size of the PyGame window
 
-        # Observations are dictionaries with the agent's and the target's location.
-        # Each location is encoded as an element of {0, ..., `size`}^2, i.e. MultiDiscrete([size, size]).
+        # Observation space for the elevator group control system
         self.observation_space = spaces.Dict(
             {
-                "agent": spaces.Box(0, size - 1, shape=(2,), dtype=int),
-                "target": spaces.Box(0, size - 1, shape=(2,), dtype=int),
-            }
-        )
+                "pos": spaces.MultiDiscrete([18, 18, 18, 18], dtype=int), # position of 4 elevators, 18 floors each.
+                "people": spaces.Box(0, 10, shape=[18, ], dtype=int), # people waiting on each floor
+                "capacity": spaces.MultiDiscrete([10, 10, 10, 10]), # capacity of the elevator 
+                "call": spaces.MultiDiscrete([18, 18, 18, 18]), # Hallway elevator calls
+                "targets": spaces.MultiBinary([18, 18, 18, 18]) # Target floors for the elevators
+            })
 
-        # We have 4 actions, corresponding to "right", "up", "left", "down", "right"
-        self.action_space = spaces.Discrete(4)
+        # We have 4 actions for each elevator, corresponding to "up", "down", "stop"
+        # If someone needs to get off at the current floor, the stop action will let the people out. 
+        # If someone needs to get on at the the current floor, the stop action will let the people in.
+        # Otherwise the elevator will be waiting.
+        # The above tasks can be done simultaneously in one timestep.
+
+        self.action_space = spaces.MultiDiscrete([3, 3, 3 ,3])
 
         """
         The following dictionary maps abstract actions from `self.action_space` to 
-        the direction we will walk in if that action is taken.
-        I.e. 0 corresponds to "right", 1 to "up" etc.
+        the direction the elevator will move in if that action is taken.
+        I.e. 0 corresponds to "up", 1 to "down", 2 to "stop".
         """
         self._action_to_direction = {
-            0: np.array([1, 0]),
-            1: np.array([0, 1]),
-            2: np.array([-1, 0]),
-            3: np.array([0, -1]),
+            0: 1,
+            1: -1,
+            2: 0
         }
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
@@ -49,7 +54,12 @@ class ElevatorGroupEnv(gym.Env):
         self.clock = None
 
     def _get_obs(self):
-        return {"agent": self._agent_location, "target": self._target_location}
+        return {"pos": self._pos,
+                "people": self._people,
+                "capacity": self._capacity,
+                "call": self._call,
+                "target": self._target_location
+                }
 
     def _get_info(self):
         return {
@@ -62,8 +72,11 @@ class ElevatorGroupEnv(gym.Env):
         # We need the following line to seed self.np_random
         super().reset(seed=seed)
 
-        # Choose the agent's location uniformly at random
-        self._agent_location = self.np_random.integers(0, self.size, size=2, dtype=int)
+        # Choose the elevators' locations uniformly at random
+        self._pos = self.np_random.integers(0, 18, size=4, dtype=int)
+
+        # Generate a random sequence of tasks. The tasks are presented as (start, goal, timestep)
+        #
 
         # We will sample the target's location randomly until it does not coincide with the agent's location
         self._target_location = self._agent_location
