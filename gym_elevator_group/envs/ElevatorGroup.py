@@ -18,13 +18,15 @@ STOP = 2
 class ElevatorGroupEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, num_floor=18, num_elevator=4, num_passenger=10, num_timestep=50, capacity=10, render_mode=None):
+    def __init__(self, num_floor=18, num_elevator=4, num_passenger=10, num_timestep=50, capacity=10, maximum_timestep=5000, render_mode=None):
 
         self.num_floor = num_floor
         self.num_elevator = num_elevator
 
         self.num_passenger = num_passenger
         self.num_timestep = num_timestep
+
+        self.maximum_timestep = maximum_timestep
 
         self.capacity = capacity # capacity of the elevator
 
@@ -104,7 +106,8 @@ class ElevatorGroupEnv(gym.Env):
         # Generate a random sequence of tasks. The tasks is a dictionary indexed 
         self._tasks = self.passenger_generator.generate_passenger()
 
-        pprint(self._tasks)
+        # DEBUG print current tasks
+        # pprint(self._tasks)
 
         # initialize observation variables
         self._curr_timestep = 0
@@ -216,7 +219,7 @@ class ElevatorGroupEnv(gym.Env):
 
 
         # An episode is done iff all the passengers have reached the target
-        terminated = self._curr_timestep > self.num_timestep and self._pending_task == 0
+        terminated = (self._curr_timestep > self.num_timestep and self._pending_task == 0) or self._curr_timestep > self.maximum_timestep
         observation = self._get_obs()
         info = self._get_info()
 
