@@ -18,7 +18,7 @@ STOP = 2
 class ElevatorGroupEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, num_floor=3, num_elevator=4, num_passenger=10, num_timestep=5, capacity=10, render_mode=None):
+    def __init__(self, num_floor=18, num_elevator=4, num_passenger=10, num_timestep=50, capacity=10, render_mode=None):
 
         self.num_floor = num_floor
         self.num_elevator = num_elevator
@@ -185,12 +185,11 @@ class ElevatorGroupEnv(gym.Env):
                             if np.array_equal(self._waiting_passengers[j], tasks_this_floor[i]):
                                 self._waiting_passengers.pop(j)
                                 break
-                        # self._waiting_passengers.remove(tasks_this_floor[i])
+                        self._tasks_queue[idx].append(tasks_this_floor[i][1])
                         self._curr_capacity[idx] -= 1
                     
                     # update number of waiting passengers
                     self._curr_passenger[self._elevator_pos[idx]] -= tasks_to_be_done
-
                     self._curr_up_call[self._elevator_pos[idx]] = False
                     self._curr_down_call[self._elevator_pos[idx]] = False
 
