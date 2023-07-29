@@ -1,1 +1,1 @@
-from gym_elevator_group.envs import ElevatorGroupEnv
+from gym_elevator_group.envs.ElevatorGroup import ElevatorGroupEnv

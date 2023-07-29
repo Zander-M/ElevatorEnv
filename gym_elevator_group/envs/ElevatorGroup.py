@@ -3,17 +3,22 @@
 # Author: Zining Mao
 # Date : July 2023
 
-import gymnasium as gym
-from gymnasium import spaces
+# import gymnasium as gym
+import gym
+from gym import spaces
 import pygame
 import numpy as np
-import PassengerGenerator
-import queue
+from gym_elevator_group.envs.PassengerGenerator import PassengerGenerator
+from pprint import pprint
+
+MOVE_UP = 0
+MOVE_DOWN = 1
+STOP = 2
 
 class ElevatorGroupEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, num_floor, num_elevator, num_passenger, num_timestep, capacity, render_mode=None):
+    def __init__(self, num_floor=3, num_elevator=4, num_passenger=10, num_timestep=5, capacity=10, render_mode=None):
 
         self.num_floor = num_floor
         self.num_elevator = num_elevator
@@ -31,7 +36,7 @@ class ElevatorGroupEnv(gym.Env):
         # Observation space for the elevator group control system
         self.observation_space = spaces.Dict(
             {
-                "pos": spaces.Box(1, self.num_floor, shape=[self.num_elevator, ], dtype=np.int32), # position of 4 elevators, 18 floors each.
+                "pos": spaces.Box(0, self.num_floor-1, shape=[self.num_elevator, ], dtype=np.int32), # position of 4 elevators, 18 floors each.
                 "passenger": spaces.Box(0, self.num_passenger, shape=[self.num_floor, ], dtype=np.int32), # people waiting on each floor
                 "capacity": spaces.Box(0, self.capacity, shape=[self.num_elevator,]), # capacity of each elevator 
                 "up_call": spaces.MultiBinary([self.num_elevator, self.num_floor]), # Hallway elevator calls for going up
@@ -86,6 +91,7 @@ class ElevatorGroupEnv(gym.Env):
         return {
             "num_passenger_delivered": self._num_passenger_delivered,
             "cumulative_waiting_time": self._cumulative_waiting_time,
+            "waiting_passengers": self._waiting_passengers
             }
 
     def reset(self, seed=None, options=None):
@@ -93,61 +99,130 @@ class ElevatorGroupEnv(gym.Env):
         super().reset(seed=seed)
 
         # Choose the elevators' start locations uniformly at random
-        self._elevator_pos = self.np_random.integers(0, self.num_floor, size=self.num_elevator, dtype=np.int32)
+        self._elevator_pos = self.np_random.integers(0, self.num_floor-1, size=self.num_elevator, dtype=np.int32)
 
         # Generate a random sequence of tasks. The tasks is a dictionary indexed 
-        self._tasks = self.passenger_generator.genereate_passengers()
+        self._tasks = self.passenger_generator.generate_passenger()
+
+        pprint(self._tasks)
 
         # initialize observation variables
         self._curr_timestep = 0
-        self._curr_passenger = np.zeros([self.num_floor])
-        self._curr_capacity = np.ones([self.num_elevator]) * self.capacity
+        self._curr_passenger = np.zeros([self.num_floor], dtype=np.int32)
+        self._curr_capacity = np.ones([self.num_elevator], dtype=np.int32) * self.capacity
         self._curr_up_call = np.zeros([self.num_floor]) 
         self._curr_down_call = np.zeros([self.num_floor])
         self._curr_car_call = np.zeros([self.num_elevator, self.num_floor])
 
         self._num_passenger_delivered = 0
         self._cumulative_waiting_time = 0 # time between start task to task complete (the passenger reaches the goal floor)
-        self._pending_task = 0
+
+        self._tasks_queue = []
+        for _ in range(self.num_elevator):
+            self._tasks_queue.append([])
+        self._pending_task = 0 # count the number of ongoing tasks
+        self._waiting_passengers = [] # list of passengers that are waiting to be pick up
 
         # update the observation based on the task sequence
-
-        for task in self._tasks[0]: # the first time step
-            # update hall calls
-            if task[2] == 1:
-                self._curr_up_call[task[0]] = True
-            else:
-                self._curr_down_call[task[0]] = True
-            self._pending_task += 1
-
-
         observation = self._get_obs()
         info = self._get_info()
 
-        if self.render_mode == "human":
-            self._render_frame()
+        # if self.render_mode == "human":
+            # self._render_frame()
 
         return observation, info
 
-    def step(self, action):
+    def step(self, actions):
         # The car call observation is updated when the passenger enters the elevator
-        # Map the action (element of {0,1,2,3}) to the direction we walk in
-        direction = self._action_to_direction[action]
-        # We use `np.clip` to make sure we don't leave the grid
-        self._agent_location = np.clip(
-            self._agent_location + direction, 0, self.size - 1
-        )
-        # An episode is done iff the agent has reached the target
-        terminated = np.array_equal(self._agent_location, self._target_location)
-        reward = 1 if terminated else 0  # Binary sparse rewards
+        reward = 0
+
+        # update observation from the environment task list
+        if self._curr_timestep in self._tasks:
+            for task in self._tasks[self._curr_timestep]:
+                # update passenger
+                self._curr_passenger[task[0]] += 1
+
+                # update hall calls
+                if task[2] == self.passenger_generator.UP:
+                    self._curr_up_call[task[0]] = True
+                elif task[2] == self.passenger_generator.DOWN:
+                    self._curr_down_call[task[0]] = True
+
+                # update pending task
+                self._pending_task += 1
+                self._waiting_passengers.append(task)
+
+        # update observation based on actions for each elevator
+        for idx, a in enumerate(actions):
+            if a == STOP:
+                # handle arriving tasks first
+                # update car call
+                self._curr_car_call[idx, self._elevator_pos[idx]] = False
+
+                # count the number of passengers leaving this floor and update reward and pending task count
+                task_completed = self._tasks_queue[idx].count(self._elevator_pos[idx]) 
+                self._num_passenger_delivered += task_completed
+                self._pending_task -= task_completed
+                reward += task_completed * 5
+
+                # remove completed tasks and update current elevator capacity
+                self._tasks_queue[idx] = [i for i in self._tasks_queue[idx] if i != self._elevator_pos[idx]] 
+                self._curr_capacity[idx] += task_completed
+
+                assert 0 <= self._curr_capacity[idx] <= self.capacity
+
+                # update hall call. We do not differentiate up calls and down calls for now 
+                # and ignore the elevators operation direction
+                if self._curr_up_call[self._elevator_pos[idx]] or self._curr_down_call[self._elevator_pos[idx]]:
+                    tasks_this_floor = [t for t in self._waiting_passengers if t[0] == self._elevator_pos[idx]]
+                    
+                    # This guarantees the capacity constraint is satisfied
+                    tasks_to_be_done = min(self._curr_capacity[idx], len(tasks_this_floor))
+                    for i in range(tasks_to_be_done):
+                        # update target floor car call
+                        self._curr_car_call[idx, tasks_this_floor[i][1]] = True
+                        for j in range(len(self._waiting_passengers)):
+                            if np.array_equal(self._waiting_passengers[j], tasks_this_floor[i]):
+                                self._waiting_passengers.pop(j)
+                                break
+                        # self._waiting_passengers.remove(tasks_this_floor[i])
+                        self._curr_capacity[idx] -= 1
+                    
+                    # update number of waiting passengers
+                    self._curr_passenger[self._elevator_pos[idx]] -= tasks_to_be_done
+
+                    self._curr_up_call[self._elevator_pos[idx]] = False
+                    self._curr_down_call[self._elevator_pos[idx]] = False
+
+                    # update hall call if some passengers remains on the floor
+                    if len(tasks_this_floor > self._curr_capacity[idx]):
+                        for t in tasks_this_floor[self._curr_capacity[idx]:]:
+                            if t[2] == self.passenger_generator.UP:
+                                self._curr_up_call[self._elevator_pos[idx]] = True 
+                            if t[2] == self.passenger_generator.DOWN:
+                                self._curr_down_call[self._elevator_pos[idx]] = True 
+
+                else:
+                    # Nothing happens. The elevator just stopped.
+                    pass
+            else:
+                # update the position of the elevators
+                direction = self._action_to_direction[a]
+                self._elevator_pos[idx] = np.clip(self._elevator_pos[idx] + direction, 0, self.num_floor-1)
+
+        reward += - self._pending_task * 0.1 # 0.1 penalty for every pending task
+
+        self._curr_timestep += 1
+        self._cumulative_waiting_time += self._pending_task
+
+
+        # An episode is done iff all the passengers have reached the target
+        terminated = self._curr_timestep > self.num_timestep and self._pending_task == 0
         observation = self._get_obs()
         info = self._get_info()
 
-        if self.render_mode == "human":
-            self._render_frame()
-
         return observation, reward, terminated, False, info
-
+'''
     def render(self):
         if self.render_mode == "rgb_array":
             return self._render_frame()
@@ -218,3 +293,4 @@ class ElevatorGroupEnv(gym.Env):
         if self.window is not None:
             pygame.display.quit()
             pygame.quit()
+'''
